@@ -127,6 +127,68 @@ impl ControllerClient {
         }
     }
 
+    pub fn redacted_endpoint(&self) -> String {
+        url::Url::parse(&self.base_url)
+            .map(|mut endpoint| {
+                let _ = endpoint.set_username("");
+                let _ = endpoint.set_password(None);
+                endpoint.set_query(None);
+                endpoint.set_fragment(None);
+                endpoint.to_string()
+            })
+            .unwrap_or_else(|_| "<invalid-controller-url>".to_string())
+    }
+
+    pub fn get_json(&self, path: &str) -> Result<serde_json::Value, String> {
+        self.get(path)
+    }
+
+    pub fn proxy_groups(&self) -> Result<serde_json::Value, String> {
+        let value: serde_json::Value = self.get("/proxies")?;
+        let mut groups = serde_json::Map::new();
+        if let Some(proxies) = value.get("proxies").and_then(serde_json::Value::as_object) {
+            for (name, proxy) in proxies {
+                if proxy
+                    .get("all")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some()
+                {
+                    groups.insert(name.clone(), proxy.clone());
+                }
+            }
+        }
+        Ok(serde_json::Value::Object(groups))
+    }
+
+    pub fn patch_config(&self, key: &str, value: serde_json::Value) -> Result<(), String> {
+        let response = self
+            .authorize(self.client.patch(format!("{}/configs", self.base_url)))
+            .json(&serde_json::json!({ key: value }))
+            .send()
+            .map_err(|error| format!("Could not update Mihomo config: {error}"))?;
+        self.ensure_success(response, "PATCH /configs")
+    }
+
+    pub fn reload_config(&self) -> Result<(), String> {
+        let response = self
+            .authorize(
+                self.client
+                    .put(format!("{}/configs?force=true", self.base_url)),
+            )
+            .json(&serde_json::json!({ "path": "", "payload": "" }))
+            .send()
+            .map_err(|error| format!("Could not reload Mihomo config: {error}"))?;
+        self.ensure_success(response, "PUT /configs?force=true")
+    }
+
+    pub fn delete(&self, path: &str) -> Result<(), String> {
+        let response = self
+            .authorize(self.client.delete(format!("{}{path}", self.base_url)))
+            .send()
+            .map_err(|error| format!("Could not send delete request: {error}"))?;
+        self.ensure_success(response, &format!("DELETE {path}"))
+    }
+
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let response = self
             .authorize(self.client.get(format!("{}{path}", self.base_url)))
@@ -148,6 +210,18 @@ impl ControllerClient {
             request.header(AUTHORIZATION, format!("Bearer {secret}"))
         } else {
             request
+        }
+    }
+
+    fn ensure_success(
+        &self,
+        response: reqwest::blocking::Response,
+        operation: &str,
+    ) -> Result<(), String> {
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("{operation} failed with {}", response.status()))
         }
     }
 }

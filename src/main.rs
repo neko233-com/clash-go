@@ -1,5 +1,8 @@
+mod cli;
+mod github;
 mod mihomo;
 
+use github::{GithubClient, is_newer_version};
 use gpui::{
     App, Application, Bounds, Context, Div, MouseButton, Render, SharedString, Window,
     WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
@@ -32,6 +35,8 @@ struct ClashGoApp {
     is_loading: bool,
     started: bool,
     last_error: Option<String>,
+    is_checking_update: bool,
+    update_status: Option<String>,
 }
 
 impl ClashGoApp {
@@ -44,6 +49,8 @@ impl ClashGoApp {
             is_loading: false,
             started: false,
             last_error,
+            is_checking_update: false,
+            update_status: None,
         }
     }
 
@@ -105,6 +112,47 @@ impl ClashGoApp {
                     }
                     Err(error) => this.last_error = Some(error),
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if self.is_checking_update {
+            return;
+        }
+        self.is_checking_update = true;
+        self.update_status = Some("Checking GitHub and available mirrors…".to_string());
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let github = GithubClient::new()?;
+                    let network = github.network_report();
+                    let route = network.selected.clone();
+                    let Some(release) = github.latest_release(&network)? else {
+                        return Ok("No public release has been published yet.".to_string());
+                    };
+                    let current = env!("CARGO_PKG_VERSION");
+                    let route = route.unwrap_or_else(|| "GitHub".into());
+                    let status = if is_newer_version(&release.tag_name, current) {
+                        format!(
+                            "Update {} is available via {}. {}",
+                            release.tag_name, route, release.html_url
+                        )
+                    } else {
+                        format!("clash-go {current} is current. Checked via {route}.")
+                    };
+                    Ok::<_, String>(status)
+                })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.is_checking_update = false;
+                this.update_status =
+                    Some(result.unwrap_or_else(|error| format!("Update check failed: {error}")));
                 cx.notify();
             });
         })
@@ -446,6 +494,8 @@ impl ClashGoApp {
                 self.overview()
             } else if self.active_page == "Proxies" {
                 self.proxies_page(cx)
+            } else if self.active_page == "Settings" {
+                self.settings_page(cx)
             } else {
                 self.placeholder_page()
             };
@@ -458,6 +508,8 @@ impl ClashGoApp {
             self.proxies_page(cx)
         } else if self.active_page == "Connections" {
             self.connections_page()
+        } else if self.active_page == "Settings" {
+            self.settings_page(cx)
         } else {
             self.placeholder_page()
         }
@@ -488,6 +540,92 @@ impl ClashGoApp {
                 "Inspect current traffic sessions",
             ))
             .child(rows)
+    }
+
+    fn settings_page(&self, cx: &Context<Self>) -> Div {
+        let button_label = if self.is_checking_update {
+            "Checking…"
+        } else {
+            "Check for updates"
+        };
+        let update_message = self
+            .update_status
+            .clone()
+            .unwrap_or_else(|| "Check the latest release. Direct GitHub and configured mirror routes are measured automatically.".to_string());
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .mt_6()
+            .child(
+                div()
+                    .p_5()
+                    .rounded(px(12.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(section_title(
+                        "Application updates",
+                        "Check the latest public Windows release",
+                    ))
+                    .child(
+                        div()
+                            .mt_4()
+                            .text_sm()
+                            .text_color(rgb(MUTED))
+                            .child(update_message),
+                    )
+                    .child(
+                        div()
+                            .mt_4()
+                            .px_4()
+                            .py_2()
+                            .rounded(px(8.0))
+                            .bg(rgb(if self.is_checking_update {
+                                SURFACE_RAISED
+                            } else {
+                                ACCENT
+                            }))
+                            .text_sm()
+                            .text_color(rgb(if self.is_checking_update {
+                                MUTED
+                            } else {
+                                0x0b1915
+                            }))
+                            .cursor_pointer()
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| this.check_for_updates(cx)),
+                            )
+                            .child(button_label),
+                    ),
+            )
+            .child(
+                div()
+                    .p_5()
+                    .rounded(px(12.0))
+                    .bg(rgb(SURFACE))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(section_title(
+                        "CLI for agents",
+                        "The same clash-go.exe exposes structured Mihomo diagnostics and controls",
+                    ))
+                    .child(
+                        div()
+                            .mt_3()
+                            .text_sm()
+                            .text_color(rgb(TEXT))
+                            .child("clash-go.exe --help · clash-go.exe --json diagnose · clash-go.exe --json config get"),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("Set CLASH_GO_CONTROLLER and optional CLASH_GO_SECRET in the agent environment. Secret values are omitted from diagnostics."),
+                    ),
+            )
     }
 }
 
@@ -527,6 +665,14 @@ impl Render for ClashGoApp {
 }
 
 fn main() {
+    if std::env::args_os().len() > 1 {
+        if let Err(error) = cli::run() {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1280.0), px(820.0)), cx);
         let controller = ControllerClient::from_environment();
