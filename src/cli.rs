@@ -31,6 +31,8 @@ enum Command {
     Proxy(ProxyArgs),
     /// List or close active Mihomo connections.
     Connections(ConnectionArgs),
+    /// Restart Mihomo, refresh Geo data, or clear engine caches.
+    Core(CoreArgs),
     /// Read rules and proxy/rule provider metadata.
     Inspect(InspectArgs),
 }
@@ -74,6 +76,22 @@ struct ConnectionArgs {
 enum ConnectionAction {
     List,
     Close { id: Option<String> },
+}
+
+#[derive(Args)]
+struct CoreArgs {
+    #[command(subcommand)]
+    action: CoreAction,
+}
+
+#[derive(Subcommand)]
+enum CoreAction {
+    /// Restart the running Mihomo core using its configured files.
+    Restart,
+    /// Refresh Geo databases using Mihomo's configured sources.
+    UpdateGeo,
+    ClearDnsCache,
+    ClearFakeIpCache,
 }
 
 #[derive(Args)]
@@ -158,15 +176,28 @@ pub fn run() -> Result<(), String> {
             }
         }
         Command::Diagnose => {
-            let controller = ControllerClient::from_environment()?;
-            let snapshot = controller.snapshot()?;
+            let controller = ControllerClient::from_environment();
+            let (endpoint, snapshot, controller_error) = match controller {
+                Ok(controller) => {
+                    let endpoint = controller.redacted_endpoint();
+                    match controller.snapshot() {
+                        Ok(snapshot) => (Some(endpoint), Some(snapshot), None),
+                        Err(error) => (
+                            Some(endpoint),
+                            None,
+                            Some(controller.sanitize_error(&error)),
+                        ),
+                    }
+                }
+                Err(error) => (None, None, Some(error)),
+            };
             let github = GithubClient::new()?;
             let network = github.network_report();
             let report = json!({
                 "app": { "name": "clash-go", "version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
-                "mihomo": { "version": snapshot.version, "mode": snapshot.mode, "mixed_port": snapshot.mixed_port, "proxy_groups": snapshot.group_count, "connections": snapshot.connection_count, "download_total": snapshot.download_total, "upload_total": snapshot.upload_total },
+                "mihomo": snapshot.as_ref().map(|snapshot| json!({ "version": snapshot.version, "mode": snapshot.mode, "mixed_port": snapshot.mixed_port, "proxy_groups": snapshot.group_count, "connections": snapshot.connection_count, "download_total": snapshot.download_total, "upload_total": snapshot.upload_total })),
                 "github_network": network,
-                "controller": { "endpoint": controller.redacted_endpoint() }
+                "controller": { "endpoint": endpoint, "connected": snapshot.is_some(), "error": controller_error }
             });
             emit(&report, cli.json, |report| {
                 println!(
@@ -224,6 +255,33 @@ pub fn run() -> Result<(), String> {
                 ConnectionAction::Close { id: None } => {
                     controller.delete("/connections")?;
                     json!({ "ok": true, "closed": "all" })
+                }
+            };
+            emit(&value, cli.json, |value| {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(value).unwrap_or_default()
+                )
+            });
+        }
+        Command::Core(args) => {
+            let controller = ControllerClient::from_environment()?;
+            let value = match args.action {
+                CoreAction::Restart => {
+                    controller.post_json("/restart", json!({ "path": "", "payload": "" }))?;
+                    json!({ "ok": true, "restarted": true })
+                }
+                CoreAction::UpdateGeo => {
+                    controller.post_json("/upgrade/geo", json!({ "path": "", "payload": "" }))?;
+                    json!({ "ok": true, "geo_update_requested": true })
+                }
+                CoreAction::ClearDnsCache => {
+                    controller.post("/cache/dns/flush")?;
+                    json!({ "ok": true, "dns_cache_cleared": true })
+                }
+                CoreAction::ClearFakeIpCache => {
+                    controller.post("/cache/fakeip/flush")?;
+                    json!({ "ok": true, "fakeip_cache_cleared": true })
                 }
             };
             emit(&value, cli.json, |value| {

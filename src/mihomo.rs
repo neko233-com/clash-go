@@ -116,7 +116,12 @@ impl ControllerClient {
                     .json(&serde_json::json!({ "name": node })),
             )
             .send()
-            .map_err(|error| format!("Could not select proxy: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Could not select proxy: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -137,6 +142,22 @@ impl ControllerClient {
                 endpoint.to_string()
             })
             .unwrap_or_else(|_| "<invalid-controller-url>".to_string())
+    }
+
+    pub fn sanitize_error(&self, error: &str) -> String {
+        let mut sanitized = error.to_string();
+        if let Some(secret) = &self.secret {
+            sanitized = sanitized.replace(secret, "[REDACTED]");
+        }
+        if let Ok(endpoint) = url::Url::parse(&self.base_url) {
+            let mut safe_endpoint = endpoint;
+            let _ = safe_endpoint.set_username("");
+            let _ = safe_endpoint.set_password(None);
+            safe_endpoint.set_query(None);
+            safe_endpoint.set_fragment(None);
+            sanitized = sanitized.replace(&self.base_url, safe_endpoint.as_str());
+        }
+        redact_embedded_urls(&sanitized)
     }
 
     pub fn get_json(&self, path: &str) -> Result<serde_json::Value, String> {
@@ -165,7 +186,12 @@ impl ControllerClient {
             .authorize(self.client.patch(format!("{}/configs", self.base_url)))
             .json(&serde_json::json!({ key: value }))
             .send()
-            .map_err(|error| format!("Could not update Mihomo config: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Could not update Mihomo config: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
         self.ensure_success(response, "PATCH /configs")
     }
 
@@ -177,7 +203,12 @@ impl ControllerClient {
             )
             .json(&serde_json::json!({ "path": "", "payload": "" }))
             .send()
-            .map_err(|error| format!("Could not reload Mihomo config: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Could not reload Mihomo config: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
         self.ensure_success(response, "PUT /configs?force=true")
     }
 
@@ -185,15 +216,52 @@ impl ControllerClient {
         let response = self
             .authorize(self.client.delete(format!("{}{path}", self.base_url)))
             .send()
-            .map_err(|error| format!("Could not send delete request: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Could not send delete request: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
         self.ensure_success(response, &format!("DELETE {path}"))
+    }
+
+    pub fn post_json(&self, path: &str, body: serde_json::Value) -> Result<(), String> {
+        let response = self
+            .authorize(self.client.post(format!("{}{path}", self.base_url)))
+            .json(&body)
+            .send()
+            .map_err(|error| {
+                format!(
+                    "Could not send POST request: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
+        self.ensure_success(response, &format!("POST {path}"))
+    }
+
+    pub fn post(&self, path: &str) -> Result<(), String> {
+        let response = self
+            .authorize(self.client.post(format!("{}{path}", self.base_url)))
+            .send()
+            .map_err(|error| {
+                format!(
+                    "Could not send POST request: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
+        self.ensure_success(response, &format!("POST {path}"))
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         let response = self
             .authorize(self.client.get(format!("{}{path}", self.base_url)))
             .send()
-            .map_err(|error| format!("Controller request failed: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Controller request failed: {}",
+                    self.sanitize_error(&error.to_string())
+                )
+            })?;
         if !response.status().is_success() {
             return Err(format!(
                 "Controller returned {} for {path}",
@@ -224,4 +292,39 @@ impl ControllerClient {
             Err(format!("{operation} failed with {}", response.status()))
         }
     }
+}
+
+fn redact_embedded_urls(message: &str) -> String {
+    let mut output = String::with_capacity(message.len());
+    let mut remaining = message;
+    loop {
+        let http = remaining.find("http://");
+        let https = remaining.find("https://");
+        let start = match (http, https) {
+            (Some(http), Some(https)) => http.min(https),
+            (Some(http), None) => http,
+            (None, Some(https)) => https,
+            (None, None) => {
+                output.push_str(remaining);
+                break;
+            }
+        };
+        output.push_str(&remaining[..start]);
+        let url_end = remaining[start..]
+            .find(|character: char| character.is_whitespace() || character == ')')
+            .map(|offset| start + offset)
+            .unwrap_or(remaining.len());
+        let token = &remaining[start..url_end];
+        if let Ok(mut url) = url::Url::parse(token) {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            output.push_str(url.as_str());
+        } else {
+            output.push_str("[redacted URL]");
+        }
+        remaining = &remaining[url_end..];
+    }
+    output
 }

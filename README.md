@@ -62,9 +62,12 @@ clash-go.exe --json inspect rules
 clash-go.exe --json inspect proxy-providers
 clash-go.exe --json inspect rule-providers
 clash-go.exe --json inspect memory
+clash-go.exe core restart
+clash-go.exe core update-geo
+clash-go.exe core clear-dns-cache
 ```
 
-`config set` accepts a JSON value, patches one running Mihomo config key, and reports core validation failures. `config reload` asks Mihomo to reload its configured file. `diagnose` returns application/core versions, mode, ports, active connection counts and GitHub route reachability; it never serializes the secret. The Mihomo operations map to its documented controller API.
+`config set` accepts a JSON value, patches one running Mihomo config key, and reports core validation failures. `config reload` asks Mihomo to reload its configured file. `diagnose` returns application/core versions, mode, ports, active connection counts and GitHub route reachability; if Mihomo is offline it includes a redacted controller error instead of failing before producing diagnostics. It never serializes the secret. The Mihomo operations map to its documented controller API.
 
 ## Build from source on Windows
 
@@ -79,8 +82,8 @@ cargo build --release --target x86_64-pc-windows-msvc
 Create and push a version tag matching `Cargo.toml` to publish a Windows x64 release:
 
 ```powershell
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 ## Compatibility plan
